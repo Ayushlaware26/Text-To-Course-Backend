@@ -1,43 +1,58 @@
 import json
 from urllib.request import urlopen
 from jose import jwt
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from functools import wraps
 from django.conf import settings
 
+# Load configuration from Django settings
 AUTH0_DOMAIN = getattr(settings, "AUTH0_DOMAIN", None)
 API_IDENTIFIER = getattr(settings, "API_IDENTIFIER", None)
 ALGORITHMS = ["RS256"]
 
-# Download JWKS (public keys) from Auth0
+# Download JWKS (JSON Web Key Set) from Auth0 once at startup
 jwks_url = f"https://{AUTH0_DOMAIN}/.well-known/jwks.json"
 jwks = json.loads(urlopen(jwks_url).read())
 
+
 def get_token_auth_header(request):
-    """Extract token from Authorization header"""
+    """
+    Extract the JWT token from the Authorization header.
+    Returns the token string if present and correctly formatted.
+    """
     auth = request.headers.get("Authorization", None)
     if not auth:
         return None
+
     parts = auth.split()
     if parts[0].lower() != "bearer" or len(parts) != 2:
         return None
+
     return parts[1]
 
+
 def require_auth(view_func):
-    """Decorator to protect endpoints"""
+    """
+    Decorator to protect Django views with Auth0 JWT authentication.
+    """
 
     @wraps(view_func)
     def wrapper(request, *args, **kwargs):
+        # Allow preflight OPTIONS request for CORS without authentication
+        if request.method == "OPTIONS":
+            return HttpResponse(status=200)
+
         token = get_token_auth_header(request)
         if not token:
             return JsonResponse({"error": "Authorization header missing"}, status=401)
 
         try:
-            # Decode token
+            # Decode the JWT
             unverified_header = jwt.get_unverified_header(token)
+
             rsa_key = {}
             for key in jwks["keys"]:
-                if key["kid"] == unverified_header["kid"]:
+                if key["kid"] == unverified_header.get("kid"):
                     rsa_key = {
                         "kty": key["kty"],
                         "kid": key["kid"],
@@ -45,8 +60,10 @@ def require_auth(view_func):
                         "n": key["n"],
                         "e": key["e"],
                     }
+                    break
+
             if not rsa_key:
-                return JsonResponse({"error": "Invalid header"}, status=401)
+                return JsonResponse({"error": "Unable to find appropriate key"}, status=401)
 
             payload = jwt.decode(
                 token,
@@ -56,8 +73,9 @@ def require_auth(view_func):
                 issuer=f"https://{AUTH0_DOMAIN}/",
             )
 
-            # Attach user info to request
+            # Attach user info to request object for later use in the view
             request.auth_payload = payload
+
         except Exception as e:
             return JsonResponse({"error": str(e)}, status=401)
 
